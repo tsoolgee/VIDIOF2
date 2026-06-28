@@ -21,7 +21,7 @@ jobs:
       run: |
         cl.exe /O2 /W3 /MT /DUNICODE /D_UNICODE ^
           launcher\launcher.cpp ^
-          user32.lib kernel32.lib comdlg32.lib ^
+          user32.lib kernel32.lib comdlg32.lib shell32.lib ^
           /link /SUBSYSTEM:WINDOWS /OUT:play.exe
 
     - name: Upload
