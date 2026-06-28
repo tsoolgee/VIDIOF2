@@ -1,12 +1,59 @@
 #include <windows.h>
 #include <strsafe.h>
+#include <shlwapi.h>
 
 #define PADDING_SIZE 64
 #define BUFFER_SIZE  (1024 * 256)
 
+// Register .VIDEO file association so double-click works
+void RegisterFileAssociation(LPCWSTR exePath) {
+    HKEY hKey;
+    WCHAR cmd[MAX_PATH * 2];
+    StringCchPrintfW(cmd, MAX_PATH*2, L"\"%s\" \"%%1\"", exePath);
+
+    // HKCU - no admin needed
+    RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\.VIDEO", 0, NULL,
+        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
+    RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)L"VideoPlayer.VIDEO",
+        (DWORD)(wcslen(L"VideoPlayer.VIDEO")+1)*2);
+    RegCloseKey(hKey);
+
+    RegCreateKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Classes\\VideoPlayer.VIDEO\\shell\\open\\command",
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
+    RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)cmd,
+        (DWORD)(wcslen(cmd)+1)*2);
+    RegCloseKey(hKey);
+
+    // Icon
+    RegCreateKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Classes\\VideoPlayer.VIDEO\\DefaultIcon",
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
+    WCHAR iconStr[MAX_PATH * 2];
+    StringCchPrintfW(iconStr, MAX_PATH*2, L"%s,0", exePath);
+    RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)iconStr,
+        (DWORD)(wcslen(iconStr)+1)*2);
+    RegCloseKey(hKey);
+
+    // Notify shell
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     int argc;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+
+    // Get exe directory
+    WCHAR exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+    WCHAR exeDir[MAX_PATH];
+    StringCchCopyW(exeDir, MAX_PATH, exePath);
+    WCHAR* slash = wcsrchr(exeDir, L'\\');
+    if (slash) *(slash+1) = L'\0';
+
+    // Register file association on first run
+    RegisterFileAssociation(exePath);
 
     WCHAR filePath[MAX_PATH] = {0};
 
@@ -24,12 +71,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
     LocalFree(argv);
 
-    // Find mpv.exe next to play.exe
-    WCHAR exeDir[MAX_PATH];
-    GetModuleFileNameW(NULL, exeDir, MAX_PATH);
-    WCHAR* slash = wcsrchr(exeDir, L'\\');
-    if (slash) *(slash+1) = L'\0';
-
     WCHAR mpvPath[MAX_PATH];
     StringCchPrintfW(mpvPath, MAX_PATH, L"%smpv.exe", exeDir);
 
@@ -38,7 +79,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    // Open the padded file
+    // Open file
     HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
@@ -50,21 +91,33 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     LARGE_INTEGER li; li.QuadPart = PADDING_SIZE;
     SetFilePointerEx(hFile, li, NULL, FILE_BEGIN);
 
-    // Create stdin pipe for mpv
+    // Create stdin pipe
     HANDLE hReadPipe, hWritePipe;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
         CloseHandle(hFile);
         return 1;
     }
-
-    // Make write end non-inheritable
     SetHandleInformation(hWritePipe, HANDLE_FLAG_INHERIT, 0);
 
-    // Launch mpv reading from stdin
-    WCHAR cmdLine[MAX_PATH * 2];
-    StringCchPrintfW(cmdLine, MAX_PATH*2,
-        L"\"%s\" --no-terminal --force-window --keep-open=yes -", mpvPath);
+    // Build mpv command - use config from exe directory
+    WCHAR confDir[MAX_PATH];
+    StringCchCopyW(confDir, MAX_PATH, exeDir);
+    // Remove trailing backslash for mpv
+    size_t len = wcslen(confDir);
+    if (len > 0 && confDir[len-1] == L'\\') confDir[len-1] = L'\0';
+
+    // Get file title for OSD
+    WCHAR* fileTitle = wcsrchr(filePath, L'\\');
+    if (!fileTitle) fileTitle = filePath; else fileTitle++;
+
+    WCHAR cmdLine[MAX_PATH * 4];
+    StringCchPrintfW(cmdLine, MAX_PATH*4,
+        L"\"%s\" --no-terminal --force-window --keep-open=yes "
+        L"--config-dir=\"%s\" "
+        L"--title=\"%%F - VideoPlayer\" "
+        L"-",
+        mpvPath, confDir);
 
     STARTUPINFOW si2 = {0};
     si2.cb = sizeof(si2);
@@ -80,10 +133,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    // Close read end on our side
     CloseHandle(hReadPipe);
 
-    // Stream file data to mpv stdin
+    // Stream data
     BYTE* buf = (BYTE*)HeapAlloc(GetProcessHeap(), 0, BUFFER_SIZE);
     DWORD dwRead, dwWritten;
     while (ReadFile(hFile, buf, BUFFER_SIZE, &dwRead, NULL) && dwRead > 0) {
