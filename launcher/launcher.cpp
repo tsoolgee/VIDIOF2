@@ -5,10 +5,9 @@
  *        (or via GitHub Actions / MSVC)
  */
 
-#define UNICODE
-#define _UNICODE
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <commdlg.h>
