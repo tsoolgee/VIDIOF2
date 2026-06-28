@@ -18,11 +18,8 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Compile play.exe
-        run: |
-          cl.exe /O2 /W3 /EHsc /DUNICODE /D_UNICODE ^
-            launcher\launcher.cpp ^
-            /Fe:play.exe ^
-            /link shell32.lib shlwapi.lib comdlg32.lib user32.lib
+        shell: cmd
+        run: cl.exe /O2 /W3 /EHsc /DUNICODE /D_UNICODE launcher\launcher.cpp /Fe:play.exe /link shell32.lib shlwapi.lib comdlg32.lib user32.lib
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
