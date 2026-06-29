@@ -16,6 +16,7 @@
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "gdi32.lib")
 
 #define XOR_KEY    0x42
 #define XOR_SIZE   (64 * 1024)
@@ -189,8 +190,6 @@ void ShowKeyHelp();
 
 // ------- IPC via named pipe -------
 static DWORD WINAPI IpcListenerThread(LPVOID) {
-    // mpv --input-ipc-server writes JSON events to pipe
-    // We read position/duration/track info
     HANDLE hPipe = CreateNamedPipeW(
         g_ipcPipeName.c_str(),
         PIPE_ACCESS_DUPLEX,
@@ -210,8 +209,6 @@ static DWORD WINAPI IpcListenerThread(LPVOID) {
         while ((pos = leftover.find('\n')) != std::string::npos) {
             std::string line = leftover.substr(0, pos);
             leftover = leftover.substr(pos+1);
-            // Parse key fields
-            // {"event":"playback-restart"} or {"event":"end-file"} or property changes
             if (line.find("\"playback-restart\"") != std::string::npos) {
                 g_playing = true;
                 PostMessage(g_hMain, WM_USER+10, 0, 0);
@@ -219,13 +216,11 @@ static DWORD WINAPI IpcListenerThread(LPVOID) {
                 g_playing = false;
                 PostMessage(g_hMain, WM_USER+11, 0, 0);
             }
-            // duration
             auto dp = line.find("\"duration\":");
             if (dp != std::string::npos) {
                 double v = atof(line.c_str()+dp+11);
                 if (v > 0) { g_duration = v; PostMessage(g_hMain, WM_USER+12, 0, 0); }
             }
-            // time-pos
             auto tp = line.find("\"time-pos\":");
             if (tp != std::string::npos && !g_seeking) {
                 g_pos = atof(line.c_str()+tp+11);
@@ -271,7 +266,6 @@ static DWORD WINAPI DecodeThread(LPVOID param) {
 
 // ------- Launch mpv with embedded window -------
 void LaunchMpv(const std::wstring& filePath) {
-    // Stop previous
     g_stopDecode = true;
     if (g_hDecodeThread) { WaitForSingleObject(g_hDecodeThread, 2000); CloseHandle(g_hDecodeThread); g_hDecodeThread = NULL; }
     if (g_hMpvProc) { TerminateProcess(g_hMpvProc, 0); CloseHandle(g_hMpvProc); g_hMpvProc = NULL; }
@@ -282,17 +276,14 @@ void LaunchMpv(const std::wstring& filePath) {
     g_duration = 0; g_pos = 0; g_playing = false;
     g_stopDecode = false;
 
-    // Create stdin pipe
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
     CreatePipe(&g_hPipeRead, &g_hPipeWrite, &sa, 0);
     SetHandleInformation(g_hPipeWrite, HANDLE_FLAG_INHERIT, 0);
 
-    // IPC pipe name
     WCHAR pipeName[64];
     StringCchPrintfW(pipeName, 64, L"\\\\.\\pipe\\vidiof_%u", GetCurrentProcessId());
     g_ipcPipeName = pipeName;
 
-    // Build command line
     WCHAR wid[32];
     StringCchPrintfW(wid, 32, L"%llu", (unsigned long long)(UINT_PTR)g_hVideo);
 
@@ -337,22 +328,18 @@ void LaunchMpv(const std::wstring& filePath) {
     g_hMpvProc = pi.hProcess;
     CloseHandle(pi.hThread);
 
-    // Start IPC listener
     CreateThread(NULL, 0, IpcListenerThread, NULL, 0, NULL);
 
-    // Observe events via IPC (sent after mpv starts and connects)
-    // We'll send these once mpvReady
-    Sleep(300); // let mpv connect
+    Sleep(300);
     SendMpvCmd("{\"command\":[\"observe_property\",1,\"time-pos\"]}");
     SendMpvCmd("{\"command\":[\"observe_property\",2,\"duration\"]}");
     SendMpvCmd("{\"command\":[\"observe_property\",3,\"pause\"]}");
 
-    // Decode thread
     DecodeState* ds = new DecodeState;
     ds->filePath = filePath;
     ds->hWrite   = g_hPipeWrite;
     ds->pStop    = &g_stopDecode;
-    g_hPipeWrite = INVALID_HANDLE_VALUE; // ownership to thread
+    g_hPipeWrite = INVALID_HANDLE_VALUE;
     g_hDecodeThread = CreateThread(NULL, 0, DecodeThread, ds, 0, NULL);
 
     g_playing = true;
@@ -392,7 +379,6 @@ std::vector<std::wstring> GetDirVideos(const std::wstring& dir) {
 }
 
 void AddToPlaylist(const std::wstring& path) {
-    // Avoid duplicates
     for (auto& p : g_playlist) if (p == path) return;
     g_playlist.push_back(path);
     UpdatePlaylistUI();
@@ -409,7 +395,6 @@ void UpdatePlaylistUI() {
     for (int i = 0; i < (int)g_playlist.size(); i++) {
         WCHAR name[MAX_PATH];
         StringCchCopyW(name, MAX_PATH, PathFindFileNameW(g_playlist[i].c_str()));
-        // Remove extension
         PathRemoveExtensionW(name);
         SendMessageW(g_hPlaylist, LB_ADDSTRING, 0, (LPARAM)name);
     }
@@ -422,14 +407,12 @@ void PlayCurrent() {
     if (g_plIndex < 0 || g_plIndex >= (int)g_playlist.size()) return;
     LaunchMpv(g_playlist[g_plIndex]);
     UpdatePlaylistUI();
-    // Update window title
     WCHAR title[MAX_PATH+32];
     WCHAR name[MAX_PATH];
     StringCchCopyW(name, MAX_PATH, PathFindFileNameW(g_playlist[g_plIndex].c_str()));
     PathRemoveExtensionW(name);
     StringCchPrintfW(title, MAX_PATH+32, L"%s — VIDIOF נגן", name);
     SetWindowTextW(g_hMain, title);
-    // Update status
     SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)name);
 }
 
@@ -464,7 +447,6 @@ void PlayNextInDir() {
     auto it = std::find(files.begin(), files.end(), curFile);
     if (it == files.end() || ++it == files.end()) it = files.begin();
     if (it == files.end()) return;
-    // Add to playlist if not there
     AddToPlaylist(*it);
     auto idx = std::find(g_playlist.begin(), g_playlist.end(), *it);
     if (idx != g_playlist.end()) {
@@ -788,10 +770,8 @@ void LayoutControls() {
         ShowWindow(g_hPlaylist, SW_HIDE);
     }
 
-    // Seek bar
     SetWindowPos(g_hSeek, NULL, 0, videoH, W, SEEK_H, SWP_NOZORDER);
 
-    // Toolbar row
     int y = videoH + SEEK_H;
     int x = 4;
     auto btn = [&](HWND h, int w) {
@@ -800,7 +780,6 @@ void LayoutControls() {
     };
     btn(g_hBtnOpen,    70);
     btn(g_hBtnAdd,     50);
-    // separator gap
     x += 6;
     btn(g_hBtnPrevDir, 36);
     btn(g_hBtnPrev,    36);
@@ -810,7 +789,6 @@ void LayoutControls() {
     btn(g_hBtnNextDir, 36);
     x += 6;
     btn(g_hBtnMute,    36);
-    // volume slider
     SetWindowPos(g_hVol, NULL, x, y + (TOOLBAR_H-20)/2, 80, 20, SWP_NOZORDER);
     ShowWindow(g_hVol, SW_SHOW);
     x += 84;
@@ -821,13 +799,10 @@ void LayoutControls() {
     btn(g_hBtnSnap,    36);
     btn(g_hBtnFull,    36);
     x += 6;
-    // Time label
     SetWindowPos(g_hTimeLabel, NULL, x, y + (TOOLBAR_H-20)/2, 160, 20, SWP_NOZORDER);
     x += 164;
-    // Speed label
     SetWindowPos(g_hSpeedLabel, NULL, x, y + (TOOLBAR_H-20)/2, 50, 20, SWP_NOZORDER);
 
-    // Status bar
     SetWindowPos(g_hStatus, NULL, 0, H-STATUSBAR_H, W, STATUSBAR_H, SWP_NOZORDER);
     SendMessageW(g_hStatus, WM_SIZE, 0, 0);
 }
@@ -845,8 +820,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_TIMER:
         if (wParam == TIMER_SEEK) {
-            // Poll via IPC already handled in listener thread
-            // Just update UI
             UpdateTimeLabel();
         }
         return 0;
@@ -890,27 +863,26 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SendMpvCmd("{\"command\":[\"frame-step\"]}"); break;
         case VK_OEM_COMMA:
             SendMpvCmd("{\"command\":[\"frame-back-step\"]}"); break;
-        case VK_OEM_4: // [
+        case VK_OEM_4:
             SetSpeed(max(0.25, g_speed-0.25)); break;
-        case VK_OEM_6: // ]
+        case VK_OEM_6:
             SetSpeed(min(4.0, g_speed+0.25)); break;
         case VK_ESCAPE:
             if (g_fullscreen) ToggleFullscreen(); break;
         }
         return 0;
     }
-    // IPC events from listener
-    case WM_USER+10: // playback started
+    case WM_USER+10:
         SetWindowTextW(g_hBtnPlay, L"⏸");
         break;
-    case WM_USER+11: { // end of file
+    case WM_USER+11: {
         SetWindowTextW(g_hBtnPlay, L"▶");
         if (g_repeat == 1) { PlayCurrent(); }
         else if (g_repeat == 2 || g_plIndex < (int)g_playlist.size()-1) PlayNext(g_repeat==2);
         break;
     }
-    case WM_USER+12: // duration updated
-    case WM_USER+13: // position updated
+    case WM_USER+12:
+    case WM_USER+13:
         UpdateTimeLabel();
         break;
     case WM_HSCROLL: {
@@ -977,12 +949,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (GetOpenFileNameW(&ofn)) OpenFile(path);
             break;
         }
-        case IDM_FILE_OPEN_URL: {
-            // Simple input dialog via MessageBox trick — just show prompt
-            // For simplicity, use a static buffer
+        case IDM_FILE_OPEN_URL:
             MessageBoxW(hWnd, L"גרור קובץ מ-URL לחלון, או השתמש בפתח קובץ.", L"פתח כתובת URL", MB_ICONINFORMATION);
             break;
-        }
         case ID_BTN_ADD:
         case IDM_FILE_ADD: {
             WCHAR path[MAX_PATH] = {0};
@@ -993,7 +962,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
             ofn.lpstrTitle = L"הוסף קבצים לרשימה";
             if (GetOpenFileNameW(&ofn)) {
-                // May have multiple files
                 WCHAR* p = path;
                 if (*(p + wcslen(p) + 1) == 0) { AddToPlaylist(p); }
                 else {
@@ -1101,18 +1069,17 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
     case WM_RBUTTONDOWN: {
-        // Context menu on video area
         POINT pt; GetCursorPos(&pt);
         HMENU hCtx = CreatePopupMenu();
-        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_PLAY,     L"נגן / עצור");
+        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_PLAY,        L"נגן / עצור");
         AppendMenuW(hCtx, MF_STRING, IDM_VIDEO_FULLSCREEN, L"מסך מלא");
         AppendMenuW(hCtx, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_NEXT,     L"הבא");
-        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_PREV,     L"קודם");
-        AppendMenuW(hCtx, MF_STRING, IDM_DIR_NEXT,      L"הבא בתיקייה");
+        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_NEXT,        L"הבא");
+        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_PREV,        L"קודם");
+        AppendMenuW(hCtx, MF_STRING, IDM_DIR_NEXT,         L"הבא בתיקייה");
         AppendMenuW(hCtx, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hCtx, MF_STRING, IDM_FILE_SNAP,     L"תמונת מסך");
-        AppendMenuW(hCtx, MF_STRING, IDM_FILE_PROPS,    L"מאפייני קובץ");
+        AppendMenuW(hCtx, MF_STRING, IDM_FILE_SNAP,        L"תמונת מסך");
+        AppendMenuW(hCtx, MF_STRING, IDM_FILE_PROPS,       L"מאפייני קובץ");
         TrackPopupMenu(hCtx, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
         DestroyMenu(hCtx);
         return 0;
@@ -1171,7 +1138,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     INITCOMMONCONTROLSEX ic={sizeof(ic),ICC_BAR_CLASSES|ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&ic);
 
-    // Get exe dir
     WCHAR exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
     WCHAR exeDir[MAX_PATH];
@@ -1188,7 +1154,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     RegisterAssoc();
 
-    // Register window class
     WNDCLASSEXW wc={sizeof(wc)};
     wc.lpfnWndProc   = MainWndProc;
     wc.hInstance     = hInst;
@@ -1199,7 +1164,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     wc.style         = CS_DBLCLKS;
     RegisterClassExW(&wc);
 
-    // Also register video child class
     WNDCLASSEXW vc={sizeof(vc)};
     vc.lpfnWndProc   = DefWindowProcW;
     vc.hInstance     = hInst;
@@ -1213,17 +1177,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         CW_USEDEFAULT, CW_USEDEFAULT, 1100, 680,
         NULL, CreateMainMenu(), hInst, NULL);
 
-    // Video panel
     g_hVideo = CreateWindowExW(0, L"VIDIOFVideoWnd", NULL,
         WS_CHILD|WS_VISIBLE, 0,0,0,0, g_hMain, (HMENU)ID_VIDEO_PANEL, hInst, NULL);
 
-    // Seek bar
     g_hSeek = MakeScrollbar(g_hMain, ID_SEEK_BAR, 1000);
-    // Volume bar
-    g_hVol = MakeScrollbar(g_hMain, ID_VOL_BAR, 200);
+    g_hVol  = MakeScrollbar(g_hMain, ID_VOL_BAR, 200);
     SetScrollPos(g_hVol, SB_CTL, 100, FALSE);
 
-    // Buttons
     g_hBtnOpen    = MakeBtn(g_hMain, L"📂 פתח",   ID_BTN_OPEN,    L"פתח קובץ");
     g_hBtnAdd     = MakeBtn(g_hMain, L"+ הוסף",   ID_BTN_ADD,     L"הוסף קבצים לרשימה");
     g_hBtnPrevDir = MakeBtn(g_hMain, L"⏮̈",        ID_BTN_PREV_DIR,L"קודם בתיקייה (Ctrl+P)");
@@ -1238,18 +1198,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     g_hBtnSnap    = MakeBtn(g_hMain, L"📷",        ID_BTN_SNAP,    L"תמונת מסך (S)");
     g_hBtnFull    = MakeBtn(g_hMain, L"⛶",         ID_BTN_FULL,    L"מסך מלא (F)");
 
-    // Labels
     g_hTimeLabel = CreateWindowW(L"STATIC", L"00:00:00 / 00:00:00",
         WS_CHILD|WS_VISIBLE|SS_LEFT, 0,0,0,0, g_hMain, (HMENU)ID_TIME_LABEL, hInst, NULL);
     g_hSpeedLabel = CreateWindowW(L"STATIC", L"1.00x",
         WS_CHILD|WS_VISIBLE|SS_LEFT, 0,0,0,0, g_hMain, (HMENU)ID_SPEED_LABEL, hInst, NULL);
 
-    // Playlist
     g_hPlaylist = CreateWindowW(L"LISTBOX", NULL,
         WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT,
         0,0,0,0, g_hMain, (HMENU)ID_PLAYLIST, hInst, NULL);
 
-    // Status bar
     g_hStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
         WS_CHILD|WS_VISIBLE|SBARS_SIZEGRIP,
         0,0,0,0, g_hMain, (HMENU)ID_STATUS_BAR, hInst, NULL);
@@ -1257,7 +1214,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     SendMessageW(g_hStatus, SB_SETPARTS, 2, (LPARAM)parts);
     SendMessageW(g_hStatus, SB_SETTEXTW, 1, (LPARAM)L"נגן VIDIOF — גרור קובץ .VIDIOF לכאן");
 
-    // Process command-line args
     int argc;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
