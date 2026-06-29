@@ -145,6 +145,7 @@ static double g_duration = 0;
 static double g_pos = 0;
 static int g_volume = 100;
 static double g_speed = 1.0;
+static double g_audioDelay = 0.0;
 static bool g_seeking = false;
 static bool g_abloop_a = false;
 static bool g_abloop_b = false;
@@ -165,6 +166,7 @@ static bool g_stopDecode = false;
 
 // Forward declarations
 LRESULT CALLBACK MainWndProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK OverlayWndProc(HWND, UINT, WPARAM, LPARAM);
 void SendMpvCmd(const std::string& cmd);
 void OpenFile(const std::wstring& path);
 void PlayCurrent();
@@ -189,6 +191,30 @@ void RegisterAssoc();
 HMENU CreateMainMenu();
 void ShowFileProps();
 void ShowKeyHelp();
+
+
+// ------- Dark theme colors (MPC-HC style) -------
+#define CLR_BG        RGB(0x1a, 0x1a, 0x1a)
+#define CLR_PANEL     RGB(0x28, 0x28, 0x28)
+#define CLR_BTN       RGB(0x38, 0x38, 0x38)
+#define CLR_BTN_HOT   RGB(0x50, 0x50, 0x50)
+#define CLR_ACCENT    RGB(0x00, 0x7A, 0xCC)
+#define CLR_TEXT      RGB(0xE0, 0xE0, 0xE0)
+#define CLR_SEEK      RGB(0x00, 0x7A, 0xCC)
+
+static HBRUSH g_hBrBg    = NULL;
+static HBRUSH g_hBrPanel = NULL;
+static HBRUSH g_hBrBtn   = NULL;
+static HFONT  g_hFontUI  = NULL;
+
+void InitDarkTheme() {
+    g_hBrBg    = CreateSolidBrush(CLR_BG);
+    g_hBrPanel = CreateSolidBrush(CLR_PANEL);
+    g_hBrBtn   = CreateSolidBrush(CLR_BTN);
+    g_hFontUI  = CreateFontW(14, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+}
 
 // ------- IPC via named pipe -------
 static DWORD WINAPI IpcListenerThread(LPVOID) {
@@ -520,6 +546,16 @@ void SetSpeed(double spd) {
     WCHAR label[32];
     StringCchPrintfW(label, 32, L"%.2fx", spd);
     SetWindowTextW(g_hSpeedLabel, label);
+}
+
+void AdjustAudioDelay(double delta) {
+    g_audioDelay += delta;
+    char cmd[64];
+    sprintf_s(cmd, "{"command":["set_property","audio-delay",%.3f]}", g_audioDelay);
+    SendMpvCmd(cmd);
+    WCHAR msg[64];
+    StringCchPrintfW(msg, 64, L"השהיית שמע: %+.0f ms", g_audioDelay * 1000);
+    SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)msg);
 }
 
 void ToggleMute() {
@@ -873,6 +909,12 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SetSpeed(min(4.0, g_speed+0.25)); break;
         case VK_ESCAPE:
             if (g_fullscreen) ToggleFullscreen(); break;
+        case VK_OEM_PLUS:  // + key
+            AdjustAudioDelay(0.05); break;
+        case VK_OEM_MINUS: // - key
+            AdjustAudioDelay(-0.05); break;
+        case 'I':
+            SendMpvCmd("{"command":["script-binding","stats/display-stats-toggle"]}"); break;
         }
         return 0;
     }
@@ -1034,8 +1076,8 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case IDM_AUDIO_MUTE:    ToggleMute(); break;
         case IDM_AUDIO_VOL_P:   SetVolume(g_volume+5); break;
         case IDM_AUDIO_VOL_M:   SetVolume(g_volume-5); break;
-        case IDM_AUDIO_DELAY_P: SendMpvCmd("{\"command\":[\"add\",\"audio-delay\",0.1]}"); break;
-        case IDM_AUDIO_DELAY_M: SendMpvCmd("{\"command\":[\"add\",\"audio-delay\",-0.1]}"); break;
+        case IDM_AUDIO_DELAY_P: AdjustAudioDelay(0.05); break;
+        case IDM_AUDIO_DELAY_M: AdjustAudioDelay(-0.05); break;
         case IDM_SUB_LOAD: {
             WCHAR path[MAX_PATH]={0};
             OPENFILENAMEW ofn={sizeof(ofn)};
@@ -1088,17 +1130,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         DestroyMenu(hCtx);
         return 0;
     }
-    case WM_LBUTTONDOWN: {
-        // Check if click is on overlay (video area)
-        POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        RECT vrc; GetWindowRect(g_hVideo, &vrc);
-        POINT spt = pt; ClientToScreen(hWnd, &spt);
-        if (spt.x >= vrc.left && spt.x < vrc.right &&
-            spt.y >= vrc.top  && spt.y < vrc.bottom) {
-            TogglePlayPause();
-        }
-        return 0;
-    }
     case WM_LBUTTONDBLCLK:
         ToggleFullscreen();
         return 0;
@@ -1112,14 +1143,93 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (g_hMpvProc) { TerminateProcess(g_hMpvProc, 0); }
         DestroyWindow(hWnd);
         return 0;
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, CLR_TEXT);
+        SetBkColor(hdc, CLR_PANEL);
+        return (LRESULT)g_hBrPanel;
+    }
+    case WM_ERASEBKGND: {
+        HDC hdc = (HDC)wParam;
+        RECT rc; GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, g_hBrBg ? g_hBrBg : (HBRUSH)GetStockObject(BLACK_BRUSH));
+        return 1;
+    }
     case WM_DESTROY:
+        if (g_hBrBg)    DeleteObject(g_hBrBg);
+        if (g_hBrPanel) DeleteObject(g_hBrPanel);
+        if (g_hBrBtn)   DeleteObject(g_hBrBtn);
+        if (g_hFontUI)  DeleteObject(g_hFontUI);
         PostQuitMessage(0);
         return 0;
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
+
+// ------- Overlay WndProc: captures mouse on video area -------
+static DWORD g_lastClickTime = 0;
+
+LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        DWORD now = GetTickCount();
+        if (now - g_lastClickTime < 400) {
+            // Double click -> fullscreen
+            g_lastClickTime = 0;
+            ToggleFullscreen();
+        } else {
+            g_lastClickTime = now;
+            TogglePlayPause();
+        }
+        return 0;
+    }
+    case WM_RBUTTONDOWN: {
+        // Forward right-click to main window as context menu
+        POINT pt; GetCursorPos(&pt);
+        HMENU hCtx = CreatePopupMenu();
+        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_PLAY,        L"נגן / עצור\tSpace");
+        AppendMenuW(hCtx, MF_STRING, IDM_VIDEO_FULLSCREEN, L"מסך מלא\tF");
+        AppendMenuW(hCtx, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_NEXT,        L"הבא\tN");
+        AppendMenuW(hCtx, MF_STRING, IDM_PLAY_PREV,        L"קודם\tP");
+        AppendMenuW(hCtx, MF_STRING, IDM_DIR_NEXT,         L"הבא בתיקייה\tCtrl+N");
+        AppendMenuW(hCtx, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hCtx, MF_STRING, IDM_AUDIO_DELAY_P,    L"השהיית שמע +50ms\t+");
+        AppendMenuW(hCtx, MF_STRING, IDM_AUDIO_DELAY_M,    L"השהיית שמע -50ms\t-");
+        AppendMenuW(hCtx, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hCtx, MF_STRING, IDM_FILE_SNAP,        L"תמונת מסך\tS");
+        AppendMenuW(hCtx, MF_STRING, IDM_FILE_PROPS,       L"מאפייני קובץ");
+        TrackPopupMenu(hCtx, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hMain, NULL);
+        DestroyMenu(hCtx);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        SetVolume(g_volume + (delta > 0 ? 5 : -5));
+        return 0;
+    }
+    case WM_SETCURSOR:
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
+        return TRUE;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(hWnd, &ps);
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1; // transparent - don't erase
+    }
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
+}
+
 // ------- Button helper -------
+void ApplyFont(HWND h) {
+    if (g_hFontUI) SendMessageW(h, WM_SETFONT, (WPARAM)g_hFontUI, TRUE);
+}
+
 HWND MakeBtn(HWND parent, const WCHAR* text, int id, const WCHAR* tip=NULL) {
     HWND h = CreateWindowW(L"BUTTON", text,
         WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON|BS_CENTER|BS_VCENTER,
@@ -1168,6 +1278,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     }
 
     RegisterAssoc();
+    InitDarkTheme();
 
     WNDCLASSEXW wc={sizeof(wc)};
     wc.lpfnWndProc   = MainWndProc;
@@ -1194,7 +1305,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     // Register overlay class
     WNDCLASSEXW oc={sizeof(oc)};
-    oc.lpfnWndProc   = DefWindowProcW;
+    oc.lpfnWndProc   = OverlayWndProc;
     oc.hInstance     = hInst;
     oc.hbrBackground = NULL;
     oc.lpszClassName = L"VIDIOFOverlay";
@@ -1205,7 +1316,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         WS_CHILD|WS_VISIBLE, 0,0,0,0, g_hMain, (HMENU)ID_VIDEO_PANEL, hInst, NULL);
 
     // Transparent overlay on top of video to capture mouse clicks
-    g_hOverlay = CreateWindowExW(WS_EX_TRANSPARENT, L"VIDIOFOverlay", NULL,
+    g_hOverlay = CreateWindowExW(0, L"VIDIOFOverlay", NULL,
         WS_CHILD|WS_VISIBLE, 0,0,0,0, g_hMain, NULL, hInst, NULL);
 
     g_hSeek = MakeScrollbar(g_hMain, ID_SEEK_BAR, 1000);
@@ -1226,13 +1337,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     g_hBtnSnap    = MakeBtn(g_hMain, L"📷",        ID_BTN_SNAP,    L"תמונת מסך (S)");
     g_hBtnFull    = MakeBtn(g_hMain, L"⛶",         ID_BTN_FULL,    L"מסך מלא (F)");
 
+    // Apply font to all controls
+    HWND hControls[] = {
+        g_hBtnOpen, g_hBtnAdd, g_hBtnPrevDir, g_hBtnPrev, g_hBtnPlay,
+        g_hBtnStop, g_hBtnNext, g_hBtnNextDir, g_hBtnMute, g_hBtnShuffle,
+        g_hBtnRepeat, g_hBtnSnap, g_hBtnFull, g_hTimeLabel, g_hSpeedLabel
+    };
+    for (auto h : hControls) ApplyFont(h);
+
     g_hTimeLabel = CreateWindowW(L"STATIC", L"00:00:00 / 00:00:00",
         WS_CHILD|WS_VISIBLE|SS_LEFT, 0,0,0,0, g_hMain, (HMENU)ID_TIME_LABEL, hInst, NULL);
     g_hSpeedLabel = CreateWindowW(L"STATIC", L"1.00x",
         WS_CHILD|WS_VISIBLE|SS_LEFT, 0,0,0,0, g_hMain, (HMENU)ID_SPEED_LABEL, hInst, NULL);
 
     g_hPlaylist = CreateWindowW(L"LISTBOX", NULL,
-        WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT,
+        WS_CHILD|WS_VISIBLE|WS_VSCROLL|LBS_NOTIFY|LBS_NOINTEGRALHEIGHT,
         0,0,0,0, g_hMain, (HMENU)ID_PLAYLIST, hInst, NULL);
 
     g_hStatus = CreateWindowW(STATUSCLASSNAMEW, NULL,
