@@ -6,6 +6,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <mmsystem.h>
+#include <windowsx.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -122,6 +123,7 @@ static HWND g_hBtnOpen, g_hBtnAdd, g_hBtnNextDir, g_hBtnPrevDir;
 static HWND g_hBtnSnap, g_hBtnABLoop;
 static HWND g_hTimeLabel, g_hSpeedLabel;
 static HWND g_hToolbar;
+static HWND g_hOverlay;
 static HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 static HANDLE g_hMpvProc = NULL;
 static HANDLE g_hDecodeThread = NULL;
@@ -744,6 +746,7 @@ void LayoutControls() {
     int W = rc.right, H = rc.bottom;
     if (g_fullscreen) {
         SetWindowPos(g_hVideo, NULL, 0, 0, W, H, SWP_NOZORDER);
+        if (g_hOverlay) ShowWindow(g_hOverlay, SW_HIDE);
         ShowWindow(g_hToolbar, SW_HIDE);
         ShowWindow(g_hSeek, SW_HIDE);
         ShowWindow(g_hVol, SW_HIDE);
@@ -762,6 +765,7 @@ void LayoutControls() {
     if (videoH < 50) videoH = 50;
 
     SetWindowPos(g_hVideo, NULL, 0, 0, videoW, videoH, SWP_NOZORDER);
+    SetWindowPos(g_hOverlay, HWND_TOP, 0, 0, videoW, videoH, SWP_SHOWWINDOW);
 
     if (g_hPlaylist && g_plVisible) {
         ShowWindow(g_hPlaylist, SW_SHOW);
@@ -1084,6 +1088,17 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         DestroyMenu(hCtx);
         return 0;
     }
+    case WM_LBUTTONDOWN: {
+        // Check if click is on overlay (video area)
+        POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        RECT vrc; GetWindowRect(g_hVideo, &vrc);
+        POINT spt = pt; ClientToScreen(hWnd, &spt);
+        if (spt.x >= vrc.left && spt.x < vrc.right &&
+            spt.y >= vrc.top  && spt.y < vrc.bottom) {
+            TogglePlayPause();
+        }
+        return 0;
+    }
     case WM_LBUTTONDBLCLK:
         ToggleFullscreen();
         return 0;
@@ -1177,8 +1192,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         CW_USEDEFAULT, CW_USEDEFAULT, 1100, 680,
         NULL, CreateMainMenu(), hInst, NULL);
 
+    // Register overlay class
+    WNDCLASSEXW oc={sizeof(oc)};
+    oc.lpfnWndProc   = DefWindowProcW;
+    oc.hInstance     = hInst;
+    oc.hbrBackground = NULL;
+    oc.lpszClassName = L"VIDIOFOverlay";
+    oc.style         = CS_DBLCLKS;
+    RegisterClassExW(&oc);
+
     g_hVideo = CreateWindowExW(0, L"VIDIOFVideoWnd", NULL,
         WS_CHILD|WS_VISIBLE, 0,0,0,0, g_hMain, (HMENU)ID_VIDEO_PANEL, hInst, NULL);
+
+    // Transparent overlay on top of video to capture mouse clicks
+    g_hOverlay = CreateWindowExW(WS_EX_TRANSPARENT, L"VIDIOFOverlay", NULL,
+        WS_CHILD|WS_VISIBLE, 0,0,0,0, g_hMain, NULL, hInst, NULL);
 
     g_hSeek = MakeScrollbar(g_hMain, ID_SEEK_BAR, 1000);
     g_hVol  = MakeScrollbar(g_hMain, ID_VOL_BAR, 200);
