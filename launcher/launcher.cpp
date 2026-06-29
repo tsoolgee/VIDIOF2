@@ -1,201 +1,126 @@
-/*
- * VIDIOF Player Launcher
- * XOR-decodes .VIDIOF files on-the-fly via stdin pipe to mpv.
- * Build: g++ -O2 -o play.exe launcher.cpp -lshell32 -lshlwapi
- *        (or via GitHub Actions / MSVC)
- */
-
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <shellapi.h>
+#include <strsafe.h>
 #include <shlwapi.h>
-#include <shlobj.h>
-#include <commdlg.h>
-#include <string>
-#include <vector>
-#include <cstdio>
-#include <thread>
-#include <fstream>
 
-#pragma comment(lib, "shlwapi.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "comdlg32.lib")
+#define XOR_KEY      0x42
+#define XOR_SIZE     (64 * 1024)   // 64KB
+#define BUFFER_SIZE  (1024 * 256)  // 256KB stream buffer
 
-static const BYTE XOR_KEY = 0x42;
+void RegisterAssociation(LPCWSTR exePath) {
+    HKEY hKey;
+    WCHAR cmd[MAX_PATH * 2];
+    StringCchPrintfW(cmd, MAX_PATH*2, L"\"%s\" \"%%1\"", exePath);
 
-// Register .VIDIOF -> this exe (HKCU, no admin needed)
-static void RegisterExtension(const std::wstring& exePath)
-{
-    HKEY hk;
-    // .VIDIOF -> VIDIOFfile
-    RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\.VIDIOF", 0,
-        nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr);
-    const wchar_t* progId = L"VIDIOFfile";
-    RegSetValueExW(hk, nullptr, 0, REG_SZ,
-        (const BYTE*)progId, (DWORD)((wcslen(progId)+1)*sizeof(wchar_t)));
-    RegCloseKey(hk);
+    RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\.VIDIOF", 0, NULL,
+        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
+    RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)L"VideoPlayer.VIDIOF",
+        (DWORD)(wcslen(L"VideoPlayer.VIDIOF")+1)*2);
+    RegCloseKey(hKey);
 
-    // ProgID shell open command
-    std::wstring cmd = L"\"" + exePath + L"\" \"%1\"";
-    std::wstring keyPath = L"Software\\Classes\\VIDIOFfile\\shell\\open\\command";
-    RegCreateKeyExW(HKEY_CURRENT_USER, keyPath.c_str(), 0,
-        nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr);
-    RegSetValueExW(hk, nullptr, 0, REG_SZ,
-        (const BYTE*)cmd.c_str(), (DWORD)((cmd.size()+1)*sizeof(wchar_t)));
-    RegCloseKey(hk);
+    RegCreateKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Classes\\VideoPlayer.VIDIOF\\shell\\open\\command",
+        0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
+    RegSetValueExW(hKey, NULL, 0, REG_SZ, (BYTE*)cmd, (DWORD)(wcslen(cmd)+1)*2);
+    RegCloseKey(hKey);
 
-    // Notify shell
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
 }
 
-// Open file dialog for .VIDIOF
-static std::wstring PickFile()
-{
-    wchar_t buf[MAX_PATH] = {};
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize  = sizeof(ofn);
-    ofn.lpstrFilter  = L"VIDIOF Files\0*.VIDIOF\0All Files\0*.*\0";
-    ofn.lpstrFile    = buf;
-    ofn.nMaxFile     = MAX_PATH;
-    ofn.Flags        = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    ofn.lpstrTitle   = L"פתח קובץ VIDIOF";
-    if (GetOpenFileNameW(&ofn))
-        return buf;
-    return {};
-}
-
-// Find mpv.exe beside this exe
-static std::wstring FindMpv()
-{
-    wchar_t self[MAX_PATH];
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    PathRemoveFileSpecW(self);
-    std::wstring dir(self);
-    return dir + L"\\mpv.exe";
-}
-
-// XOR-decode thread: reads from file, XORs, writes to pipe write-end
-struct PipeArgs {
-    std::wstring filePath;
-    HANDLE       hWrite;
-};
-
-static DWORD WINAPI XorPipeThread(LPVOID param)
-{
-    PipeArgs* args = (PipeArgs*)param;
-    std::ifstream fin(args->filePath, std::ios::binary);
-    if (!fin) { CloseHandle(args->hWrite); delete args; return 1; }
-
-    const size_t CHUNK = 256 * 1024; // 256 KB
-    std::vector<BYTE> buf(CHUNK);
-
-    while (fin)
-    {
-        fin.read((char*)buf.data(), CHUNK);
-        std::streamsize got = fin.gcount();
-        if (got <= 0) break;
-
-        for (std::streamsize i = 0; i < got; ++i)
-            buf[i] ^= XOR_KEY;
-
-        DWORD written = 0;
-        if (!WriteFile(args->hWrite, buf.data(), (DWORD)got, &written, nullptr))
-            break;
-    }
-
-    CloseHandle(args->hWrite);
-    delete args;
-    return 0;
-}
-
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
-{
-    // Register extension on first run
-    wchar_t selfPath[MAX_PATH];
-    GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
-    RegisterExtension(selfPath);
-
-    // Get file from args or dialog
-    std::wstring filePath;
-    int argc = 0;
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    int argc;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argc >= 2)
-        filePath = argv[1];
+
+    WCHAR exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+    WCHAR exeDir[MAX_PATH];
+    StringCchCopyW(exeDir, MAX_PATH, exePath);
+    WCHAR* sl = wcsrchr(exeDir, L'\\');
+    if (sl) *(sl+1) = L'\0';
+
+    RegisterAssociation(exePath);
+
+    WCHAR filePath[MAX_PATH] = {0};
+    if (argc < 2) {
+        OPENFILENAMEW ofn = {0};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.lpstrFilter = L"VIDIOF Files\0*.VIDIOF\0All Files\0*.*\0";
+        ofn.lpstrFile = filePath;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST;
+        ofn.lpstrTitle = L"Select VIDIOF file";
+        if (!GetOpenFileNameW(&ofn)) { LocalFree(argv); return 0; }
+    } else {
+        StringCchCopyW(filePath, MAX_PATH, argv[1]);
+    }
     LocalFree(argv);
 
-    if (filePath.empty())
-        filePath = PickFile();
-    if (filePath.empty())
-        return 0;
-
-    // Find mpv
-    std::wstring mpvPath = FindMpv();
-    if (!PathFileExistsW(mpvPath.c_str()))
-    {
-        MessageBoxW(nullptr, L"mpv.exe לא נמצא בתיקייה של play.exe",
-                    L"שגיאה", MB_ICONERROR);
+    WCHAR mpvPath[MAX_PATH];
+    StringCchPrintfW(mpvPath, MAX_PATH, L"%smpv.exe", exeDir);
+    if (GetFileAttributesW(mpvPath) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxW(NULL, L"mpv.exe not found!", L"Error", MB_ICONERROR);
         return 1;
     }
 
-    // Create anonymous pipe (read → mpv stdin, write → our thread)
+    HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBoxW(NULL, L"Cannot open file", L"Error", MB_ICONERROR);
+        return 1;
+    }
+
+    // Create stdin pipe for mpv
     HANDLE hRead, hWrite;
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
-    {
-        MessageBoxW(nullptr, L"שגיאה ביצירת pipe", L"שגיאה", MB_ICONERROR);
-        return 1;
-    }
-
-    // Make sure write end is NOT inherited by child
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+    CreatePipe(&hRead, &hWrite, &sa, 0);
     SetHandleInformation(hWrite, HANDLE_FLAG_INHERIT, 0);
 
-    // Build mpv command line: read from stdin pipe
-    std::wstring cmdLine = L"\"" + mpvPath + L"\" --keep-open=yes "
-        L"--cache=yes --demuxer-max-bytes=50MiB "
-        L"--sub-auto=fuzzy "
-        L"--save-position-on-quit "
-        L"--volume-max=200 "
-        L"--script-opts=osc-scalewindowed=1.2 "
-        L"--";          // next arg is filename, but we use stdin
-    // We actually pipe via stdin; tell mpv to read from stdin
-    cmdLine += L" -";   // '-' means stdin
+    // Build config dir path (remove trailing backslash)
+    WCHAR confDir[MAX_PATH];
+    StringCchCopyW(confDir, MAX_PATH, exeDir);
+    size_t len = wcslen(confDir);
+    if (len > 0 && confDir[len-1] == L'\\') confDir[len-1] = L'\0';
 
-    STARTUPINFOW si = {};
-    si.cb          = sizeof(si);
-    si.dwFlags     = STARTF_USESTDHANDLES;
-    si.hStdInput   = hRead;
-    si.hStdOutput  = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError   = GetStdHandle(STD_ERROR_HANDLE);
+    WCHAR cmdLine[MAX_PATH * 4];
+    StringCchPrintfW(cmdLine, MAX_PATH*4,
+        L"\"%s\" --no-terminal --force-window --keep-open=yes --config-dir=\"%s\" -",
+        mpvPath, confDir);
 
-    PROCESS_INFORMATION pi = {};
-    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
-    cmdBuf.push_back(0);
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = hRead;
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
 
-    if (!CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr,
-                        TRUE, 0, nullptr, nullptr, &si, &pi))
-    {
-        DWORD err = GetLastError();
-        wchar_t msg[256];
-        swprintf(msg, 256, L"לא ניתן להפעיל mpv.exe (שגיאה %lu)", err);
-        MessageBoxW(nullptr, msg, L"שגיאה", MB_ICONERROR);
-        CloseHandle(hRead);
-        CloseHandle(hWrite);
+    PROCESS_INFORMATION pi = {0};
+    if (!CreateProcessW(NULL, cmdLine, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        MessageBoxW(NULL, L"Failed to launch mpv", L"Error", MB_ICONERROR);
+        CloseHandle(hFile); CloseHandle(hRead); CloseHandle(hWrite);
         return 1;
     }
-
-    // Close read end in parent (child owns it now)
     CloseHandle(hRead);
-    CloseHandle(pi.hThread);
 
-    // Spawn XOR pipe thread
-    PipeArgs* args = new PipeArgs{ filePath, hWrite };
-    HANDLE hThread = CreateThread(nullptr, 0, XorPipeThread, args, 0, nullptr);
-    if (!hThread) { CloseHandle(hWrite); delete args; }
-    else          CloseHandle(hThread);
+    BYTE* buf = (BYTE*)HeapAlloc(GetProcessHeap(), 0, BUFFER_SIZE);
+    DWORD dwRead, dwWritten;
+    BOOL first = TRUE;
+    DWORD xorRemain = XOR_SIZE;
 
-    // Wait for mpv to exit
+    while (ReadFile(hFile, buf, BUFFER_SIZE, &dwRead, NULL) && dwRead > 0) {
+        if (xorRemain > 0) {
+            DWORD toXor = min(dwRead, xorRemain);
+            for (DWORD i = 0; i < toXor; i++)
+                buf[i] ^= XOR_KEY;
+            xorRemain -= toXor;
+        }
+        if (!WriteFile(hWrite, buf, dwRead, &dwWritten, NULL)) break;
+    }
+
+    HeapFree(GetProcessHeap(), 0, buf);
+    CloseHandle(hWrite);
+    CloseHandle(hFile);
     WaitForSingleObject(pi.hProcess, INFINITE);
     CloseHandle(pi.hProcess);
-
+    CloseHandle(pi.hThread);
     return 0;
 }
