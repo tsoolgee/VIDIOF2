@@ -551,7 +551,7 @@ void SetSpeed(double spd) {
 void AdjustAudioDelay(double delta) {
     g_audioDelay += delta;
     char cmd[64];
-    sprintf_s(cmd, "{"command":["set_property","audio-delay",%.3f]}", g_audioDelay);
+    sprintf_s(cmd, sizeof(cmd), "{\"command\":[\"set_property\",\"audio-delay\",%.3f]}", g_audioDelay);
     SendMpvCmd(cmd);
     WCHAR msg[64];
     StringCchPrintfW(msg, 64, L"השהיית שמע: %+.0f ms", g_audioDelay * 1000);
@@ -914,7 +914,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case VK_OEM_MINUS: // - key
             AdjustAudioDelay(-0.05); break;
         case 'I':
-            SendMpvCmd("{"command":["script-binding","stats/display-stats-toggle"]}"); break;
+            SendMpvCmd("{\"command\":[\"script-binding\",\"stats/display-stats-toggle\"]}"); break;
         }
         return 0;
     }
