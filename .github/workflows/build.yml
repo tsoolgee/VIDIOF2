@@ -1,28 +1,26 @@
-name: Build play.exe
+name: Build VIDIOF Player
 
 on:
   push:
-    paths:
-      - 'launcher/launcher.cpp'
-      - '.github/workflows/build.yml'
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
+    - name: Build play.exe
+      shell: cmd
+      run: |
+        cl.exe /O2 /W3 /MT /DUNICODE /D_UNICODE ^
+          launcher/launcher.cpp ^
+          user32.lib kernel32.lib comdlg32.lib shell32.lib shlwapi.lib ^
+          /link /SUBSYSTEM:WINDOWS /OUT:play.exe
 
-      - name: Compile play.exe
-        shell: cmd
-        run: cl.exe /O2 /W3 /EHsc /DUNICODE /D_UNICODE launcher\launcher.cpp /Fe:play.exe /link shell32.lib shlwapi.lib comdlg32.lib user32.lib advapi32.lib
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: play-exe
-          path: play.exe
-          retention-days: 30
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: play
+        path: play.exe
