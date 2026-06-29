@@ -6,7 +6,6 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <mmsystem.h>
-#include <advapi32.h>
 #include <string>
 #include <vector>
 #include <algorithm>
