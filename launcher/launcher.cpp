@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <strsafe.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 
 #define XOR_KEY      0x42
 #define XOR_SIZE     (64 * 1024)   // 64KB
